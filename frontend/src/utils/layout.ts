@@ -57,6 +57,12 @@ export function emptySlots(rows: number, cols: number, slots: CaseSlot[]): RCCel
   return allPositions(rows, cols).filter((p) => !used.has(rcKey(p.row, p.col)));
 }
 
+/** 格位的行列文字坐标，例：A1、C12 */
+export function slotLabel(row: number, col: number): string {
+  const letter = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[row] ?? String(row + 1);
+  return `${letter}${col + 1}`;
+}
+
 /** 取指定格位的落位 */
 export function slotAt(slots: CaseSlot[], row: number, col: number): CaseSlot | undefined {
   return slots.find((s) => s.row === row && s.col === col);
@@ -68,9 +74,19 @@ export interface DuplicateGroup {
   keys: string[];
 }
 
+/** 同一枚字模（matrixId）在同一字盘内重复落位的分组 */
+export interface DuplicateMatrixGroup {
+  matrixId: string;
+  character: string;
+  keys: string[];
+  labels: string[];
+}
+
 export interface SlotConflicts {
   /** 同一字符重复落位的分组 */
   duplicateCharacters: DuplicateGroup[];
+  /** 同一枚字模重复落位的分组 */
+  duplicateMatrices: DuplicateMatrixGroup[];
   /** 同一格位出现多条落位记录 */
   duplicatePositions: string[];
   /** 越界格位 */
@@ -78,9 +94,10 @@ export interface SlotConflicts {
   hasConflict: boolean;
 }
 
-/** 冲突检测：重复落位、同格位重复、越界 */
+/** 冲突检测：重复落位、同枚字模重复、同格位重复、越界 */
 export function detectConflicts(rows: number, cols: number, slots: CaseSlot[]): SlotConflicts {
   const byChar = new Map<string, string[]>();
+  const byMatrix = new Map<string, { character: string; keys: string[] }>();
   const byKey = new Map<string, number>();
   const outOfRange: string[] = [];
   for (const s of slots) {
@@ -90,20 +107,59 @@ export function detectConflicts(rows: number, cols: number, slots: CaseSlot[]): 
     const arr = byChar.get(s.character) ?? [];
     arr.push(key);
     byChar.set(s.character, arr);
+    if (s.matrixId) {
+      const group = byMatrix.get(s.matrixId) ?? { character: s.character, keys: [] };
+      group.keys.push(key);
+      byMatrix.set(s.matrixId, group);
+    }
   }
   const duplicateCharacters: DuplicateGroup[] = [];
   byChar.forEach((keys, character) => {
     if (keys.length > 1) duplicateCharacters.push({ character, count: keys.length, keys });
+  });
+  const duplicateMatrices: DuplicateMatrixGroup[] = [];
+  byMatrix.forEach((group, matrixId) => {
+    if (group.keys.length > 1) {
+      duplicateMatrices.push({
+        matrixId,
+        character: group.character,
+        keys: group.keys,
+        labels: group.keys.map((k) => {
+          const cell = parseRcKey(k);
+          return cell ? slotLabel(cell.row, cell.col) : k;
+        }),
+      });
+    }
   });
   const duplicatePositions = Array.from(byKey.entries())
     .filter(([, n]) => n > 1)
     .map(([k]) => k);
   return {
     duplicateCharacters,
+    duplicateMatrices,
     duplicatePositions,
     outOfRange,
-    hasConflict: duplicateCharacters.length > 0 || duplicatePositions.length > 0 || outOfRange.length > 0,
+    hasConflict:
+      duplicateCharacters.length > 0 ||
+      duplicateMatrices.length > 0 ||
+      duplicatePositions.length > 0 ||
+      outOfRange.length > 0,
   };
+}
+
+/**
+ * 校验同一枚字模是否在布局内重复落位（落格时即时拦截用）。
+ * 同一格位重复摆放同一枚视为覆盖，不算重复；返回其余占用格位。
+ */
+export function findDuplicateMatrixSlots(
+  slots: CaseSlot[],
+  matrixId: string,
+  targetRow: number,
+  targetCol: number,
+): CaseSlot[] {
+  return slots.filter(
+    (s) => s.matrixId === matrixId && !(s.row === targetRow && s.col === targetCol),
+  );
 }
 
 /** 容量校验：行 / 列合法性与可用格位数 */

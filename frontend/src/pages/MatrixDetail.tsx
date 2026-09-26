@@ -5,7 +5,7 @@ import EmptyState from '../components/common/EmptyState';
 import LayoutGrid from '../components/common/LayoutGrid';
 import MatrixCell from '../components/common/MatrixCell';
 import { useMatrixStore } from '../stores/matrixStore';
-import { findCaseHolding, useCaseStore } from '../stores/caseStore';
+import { findCaseHolding, findUniqueHolding, useCaseStore } from '../stores/caseStore';
 import { useUiStore } from '../stores/uiStore';
 import { DEFECT_SEVERITIES, DEFECT_TYPES, validateDefectInput } from '../types/defect';
 import type { DefectSeverity, DefectType } from '../types/defect';
@@ -61,6 +61,9 @@ export default function MatrixDetail() {
     [proofs, id],
   );
   const holdings = useMemo(() => findCaseHolding(cases, id), [cases, id]);
+  /** 实体字模唯一落位：调拨保存后应恰好读到唯一字盘、唯一格位 */
+  const uniqueHolding = useMemo(() => findUniqueHolding(cases, id), [cases, id]);
+  const holdingAmbiguous = uniqueHolding.status === 'ambiguous';
 
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState({
@@ -273,7 +276,7 @@ export default function MatrixDetail() {
           <div className="mt-3 space-y-1 text-xs text-ink-soft">
             <p>缺损记录 {matrixDefects.length} 条</p>
             <p>试印记录 {matrixProofs.length} 条</p>
-            <p>所在字盘 {holdings.length} 处</p>
+            <p>所在字盘 {holdingAmbiguous ? `${holdings.length} 处（数据异常）` : holdings.length} 处</p>
           </div>
           {editing ? (
             <div className="mt-3 space-y-2 border-t border-paper-line pt-3">
@@ -352,6 +355,20 @@ export default function MatrixDetail() {
 
           <div className="border-t border-paper-line px-4 py-3">
             <h4 className="mb-2 font-song text-sm font-semibold text-ink">所在字盘格位</h4>
+            {uniqueHolding.status === 'unique' ? (
+              <p className="mb-2 text-xs text-ink-soft" data-testid="unique-holding">
+                唯一落位：
+                {uniqueHolding.typeCase.code}（{uniqueHolding.typeCase.kind} ·{' '}
+                {uniqueHolding.typeCase.workStation}）
+                {String.fromCharCode(65 + uniqueHolding.slot.row)}
+                {uniqueHolding.slot.col + 1}
+              </p>
+            ) : null}
+            {holdingAmbiguous ? (
+              <p className="mb-2 text-xs font-semibold text-seal" data-testid="ambiguous-holding-warning">
+                数据异常：同一枚实体字模同时落在多个格位，请在字盘布局页重新保存一次以按调拨归位。
+              </p>
+            ) : null}
             {holdings.length === 0 ? (
               <p className="text-xs text-ink-mute" data-testid="no-holding">
                 该字模当前未落在任何字盘格位上，可到「字盘布局」页面落位。

@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useCaseStore } from '../stores/caseStore';
+import { useCaseStore, type SaveSlotsResult } from '../stores/caseStore';
 import type { CaseSlot, TypeCase } from '../types/case';
 import type { TypeMatrix } from '../types/matrix';
 import {
   detectConflicts,
   emptySlots,
   fillRate,
+  findDuplicateMatrixSlots,
   placeSlot,
   removeSlot,
+  slotLabel,
   swapSlots,
   validateCapacity,
   type RCCell,
@@ -24,6 +26,11 @@ export interface CaseSlotsApi {
   capacity: ReturnType<typeof validateCapacity>;
   fillPercent: number;
   emptyCells: RCCell[];
+  /**
+   * 落位前校验同一枚字模是否已占本字盘其他格位。
+   * 返回冲突说明文字；无冲突返回 null。
+   */
+  placementIssue: (matrix: TypeMatrix, row: number, col: number) => string | null;
   /** 落位：把一枚可用字模放到指定格位 */
   place: (matrix: TypeMatrix, row: number, col: number) => void;
   /** 取出格位上的字模 */
@@ -32,8 +39,8 @@ export interface CaseSlotsApi {
   swap: (a: RCCell, b: RCCell) => void;
   clear: () => void;
   replaceAll: (next: CaseSlot[]) => void;
-  /** 保存到 IndexedDB（并刷新 matrixId 多值索引） */
-  save: () => Promise<void>;
+  /** 保存到 IndexedDB（跨字盘调拨 + 刷新 matrixId 多值索引），返回调拨明细 */
+  save: () => Promise<SaveSlotsResult>;
   /** 放弃未保存改动，回到落库版本 */
   revert: () => void;
 }
@@ -68,6 +75,17 @@ export function useCaseSlots(typeCase: TypeCase | undefined): CaseSlotsApi {
   const fillPercent = useMemo(() => fillRate(slots, rows, cols), [slots, rows, cols]);
   const emptyCells = useMemo(() => emptySlots(rows, cols, slots), [rows, cols, slots]);
 
+  const placementIssue = useCallback(
+    (matrix: TypeMatrix, row: number, col: number) => {
+      const occupied = findDuplicateMatrixSlots(slots, matrix.id, row, col);
+      if (occupied.length === 0) return null;
+      return `同一枚字模「${matrix.character}」（${matrix.code}）已落在本字盘 ${occupied
+        .map((s) => slotLabel(s.row, s.col))
+        .join('、')}，请先从该格取出或改用调换`;
+    },
+    [slots],
+  );
+
   const place = useCallback((matrix: TypeMatrix, row: number, col: number) => {
     const slot: CaseSlot = {
       row,
@@ -92,10 +110,10 @@ export function useCaseSlots(typeCase: TypeCase | undefined): CaseSlotsApi {
   const revert = useCallback(() => setSlots(typeCase?.slots ?? []), [typeCase?.slots]);
 
   const save = useCallback(async () => {
-    if (!typeCase) return;
+    if (!typeCase) throw new Error('未选择字盘');
     setSaving(true);
     try {
-      await saveSlots(typeCase.id, slots);
+      return await saveSlots(typeCase.id, slots);
     } finally {
       setSaving(false);
     }
@@ -109,6 +127,7 @@ export function useCaseSlots(typeCase: TypeCase | undefined): CaseSlotsApi {
     capacity,
     fillPercent,
     emptyCells,
+    placementIssue,
     place,
     take,
     swap,
