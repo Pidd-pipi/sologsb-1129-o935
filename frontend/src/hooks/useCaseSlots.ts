@@ -1,18 +1,28 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useCaseStore } from '../stores/caseStore';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCaseStore, type SaveSlotsResult } from '../stores/caseStore';
 import type { CaseSlot, TypeCase } from '../types/case';
 import type { TypeMatrix } from '../types/matrix';
 import {
   detectConflicts,
   emptySlots,
   fillRate,
+  findSlotsByMatrix,
   placeSlot,
   removeSlot,
+  slotLabel,
   swapSlots,
   validateCapacity,
   type RCCell,
   type SlotConflicts,
 } from '../utils/layout';
+
+/** 同一枚字模在编辑中字盘重复落位时的说明（另一格已占用的位置） */
+export interface DuplicatePlacement {
+  matrixId: string;
+  character: string;
+  /** 已占用格位标签 */
+  positions: string[];
+}
 
 export interface CaseSlotsApi {
   /** 当前编辑中的格位布局（可能尚未保存） */
@@ -24,16 +34,20 @@ export interface CaseSlotsApi {
   capacity: ReturnType<typeof validateCapacity>;
   fillPercent: number;
   emptyCells: RCCell[];
-  /** 落位：把一枚可用字模放到指定格位 */
-  place: (matrix: TypeMatrix, row: number, col: number) => void;
+  /**
+   * 落位：把一枚字模放到指定格位。
+   * 同一枚字模已在本字盘其它格位时拒绝（返回占用说明），请先取出或用调换移动；
+   * 原格位与目标格位相同则幂等放行。成功返回 null。
+   */
+  place: (matrix: TypeMatrix, row: number, col: number) => DuplicatePlacement | null;
   /** 取出格位上的字模 */
   take: (row: number, col: number) => void;
   /** 调换两个格位（目标为空时视为移动） */
   swap: (a: RCCell, b: RCCell) => void;
   clear: () => void;
   replaceAll: (next: CaseSlot[]) => void;
-  /** 保存到 IndexedDB（并刷新 matrixId 多值索引） */
-  save: () => Promise<void>;
+  /** 保存到 IndexedDB：同一字模从其它字盘原子取出（调拨），失败时原位置保留 */
+  save: () => Promise<SaveSlotsResult | undefined>;
   /** 放弃未保存改动，回到落库版本 */
   revert: () => void;
 }
@@ -46,6 +60,10 @@ export function useCaseSlots(typeCase: TypeCase | undefined): CaseSlotsApi {
   const saveSlots = useCaseStore((s) => s.saveSlots);
   const [slots, setSlots] = useState<CaseSlot[]>(typeCase?.slots ?? []);
   const [saving, setSaving] = useState(false);
+  const slotsRef = useRef(slots);
+  useEffect(() => {
+    slotsRef.current = slots;
+  }, [slots]);
 
   const version = `${typeCase?.id ?? ''}#${typeCase?.updatedAt ?? ''}`;
   useEffect(() => {
@@ -68,16 +86,32 @@ export function useCaseSlots(typeCase: TypeCase | undefined): CaseSlotsApi {
   const fillPercent = useMemo(() => fillRate(slots, rows, cols), [slots, rows, cols]);
   const emptyCells = useMemo(() => emptySlots(rows, cols, slots), [rows, cols, slots]);
 
-  const place = useCallback((matrix: TypeMatrix, row: number, col: number) => {
-    const slot: CaseSlot = {
-      row,
-      col,
-      character: matrix.character,
-      matrixId: matrix.id,
-      placedAt: new Date().toISOString(),
-    };
-    setSlots((cur) => placeSlot(cur, slot));
-  }, []);
+  const place = useCallback(
+    (matrix: TypeMatrix, row: number, col: number): DuplicatePlacement | null => {
+      const elsewhere = findSlotsByMatrix(slotsRef.current, matrix.id).filter(
+        (s) => s.row !== row || s.col !== col,
+      );
+      if (elsewhere.length > 0) {
+        return {
+          matrixId: matrix.id,
+          character: matrix.character,
+          positions: elsewhere
+            .map((s) => slotLabel(s.row, s.col))
+            .sort((a, b) => a.localeCompare(b, 'en', { numeric: true })),
+        };
+      }
+      const slot: CaseSlot = {
+        row,
+        col,
+        character: matrix.character,
+        matrixId: matrix.id,
+        placedAt: new Date().toISOString(),
+      };
+      setSlots((cur) => placeSlot(cur, slot));
+      return null;
+    },
+    [],
+  );
 
   const take = useCallback((row: number, col: number) => {
     setSlots((cur) => removeSlot(cur, row, col));
@@ -92,10 +126,10 @@ export function useCaseSlots(typeCase: TypeCase | undefined): CaseSlotsApi {
   const revert = useCallback(() => setSlots(typeCase?.slots ?? []), [typeCase?.slots]);
 
   const save = useCallback(async () => {
-    if (!typeCase) return;
+    if (!typeCase) return undefined;
     setSaving(true);
     try {
-      await saveSlots(typeCase.id, slots);
+      return await saveSlots(typeCase.id, slots);
     } finally {
       setSaving(false);
     }

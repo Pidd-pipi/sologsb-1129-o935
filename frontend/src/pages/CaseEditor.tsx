@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import CharacterPicker from '../components/common/CharacterPicker';
 import EmptyState from '../components/common/EmptyState';
@@ -12,7 +12,7 @@ import type { CaseKind, CaseSlot, TypeCase } from '../types/case';
 import { CASE_KINDS, COL_RANGE, ROW_RANGE, describeCapacity, validateCaseInput } from '../types/case';
 import type { TypeMatrix } from '../types/matrix';
 import { suggestCaseCode } from '../utils/format';
-import { rcKey, slotAt, type RCCell } from '../utils/layout';
+import { rcKey, slotAt, slotLabel, type RCCell } from '../utils/layout';
 
 /** 字盘列表 + 新建字盘 */
 export default function CaseEditor() {
@@ -232,12 +232,22 @@ interface PendingPlacement {
 
 function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
   const pushToast = useUiStore((s) => s.pushToast);
+  const cases = useCaseStore((s) => s.cases);
   const api = useCaseSlots(typeCase);
   const { results: candidateMatrices } = useMatrixSearch({ availability: ['可用'], ignoreKeyword: true });
   const [pickedChar, setPickedChar] = useState('');
   const [pending, setPending] = useState<PendingPlacement | null>(null);
   const [selectedKey, setSelectedKey] = useState('');
   const [swapFrom, setSwapFrom] = useState<RCCell | null>(null);
+
+  /** 一枚字模当前（落库状态）落在哪些字盘的哪些格位 */
+  const holdingsOf = useCallback(
+    (matrixId: string) =>
+      cases
+        .map((c) => ({ typeCase: c, slots: c.slots.filter((s) => s.matrixId === matrixId) }))
+        .filter((h) => h.slots.length > 0),
+    [cases],
+  );
 
   const { draft, patch, reset: resetDraft } = useLocalDraft<{ slots: CaseSlot[] }>(
     DRAFT_KEYS.caseEditor(typeCase.id),
@@ -265,6 +275,7 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
 
   const conflictKeys = useMemo(
     () => [
+      ...api.conflicts.duplicateMatrices.flatMap((g) => g.keys),
       ...api.conflicts.duplicatePositions,
       ...api.conflicts.outOfRange,
       ...api.conflicts.duplicateCharacters.flatMap((g) => g.keys),
@@ -276,9 +287,21 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
     const key = rcKey(row, col);
     setSelectedKey(key);
     if (pending) {
-      api.place(pending.matrix, row, col);
+      const blocked = api.place(pending.matrix, row, col);
+      if (blocked) {
+        pushToast(
+          `「${blocked.character}」（${blocked.matrixId}）已占用本字盘 ${blocked.positions.join('、')}，请先取出原格或改用调换`,
+          'warn',
+        );
+        return;
+      }
+      const elsewhere = holdingsOf(pending.matrix.id).filter((h) => h.typeCase.id !== typeCase.id);
       pushToast(
-        `已在 ${rowLabel(row)}${col + 1} 落位「${pending.matrix.character}」（${pending.matrix.code}）`,
+        elsewhere.length > 0
+          ? `已在 ${rowLabel(row)}${col + 1} 落位「${pending.matrix.character}」（${pending.matrix.code}），保存时将从原字盘 ${elsewhere
+              .map((h) => h.typeCase.code)
+              .join('、')} 调拨取出`
+          : `已在 ${rowLabel(row)}${col + 1} 落位「${pending.matrix.character}」（${pending.matrix.code}）`,
       );
       return;
     }
@@ -299,11 +322,19 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
 
   const handleSave = async () => {
     try {
-      await api.save();
-      patch({ slots: api.slots });
-      pushToast(`字盘 ${typeCase.code} 布局已保存（${api.slots.length} 格）`);
+      const result = await api.save();
+      if (!result) return;
+      patch({ slots: result.typeCase.slots });
+      if (result.transfers.length > 0) {
+        const detail = result.transfers
+          .map((t) => `从 ${t.fromCase.code} ${t.positions.join('、')} 取出「${t.character}」`)
+          .join('；');
+        pushToast(`字盘 ${typeCase.code} 布局已保存，已按调拨处理：${detail}`);
+      } else {
+        pushToast(`字盘 ${typeCase.code} 布局已保存（${result.typeCase.slots.length} 格）`);
+      }
     } catch (err) {
-      pushToast(err instanceof Error ? err.message : '保存失败', 'error');
+      pushToast(err instanceof Error ? err.message : '保存失败，原字盘格位仍保留', 'error');
     }
   };
 
@@ -321,7 +352,7 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <button type="button" className="mt-btn mt-btn-primary" data-testid="save-layout-btn" onClick={handleSave} disabled={api.saving}>
+            <button type="button" className="mt-btn mt-btn-primary" data-testid="save-layout-btn" onClick={handleSave} disabled={api.saving || api.conflicts.duplicateMatrices.length > 0}>
               {api.saving ? '保存中…' : api.dirty ? '保存布局（有改动）' : '保存布局'}
             </button>
             <button type="button" className="mt-btn" data-testid="revert-layout-btn" onClick={api.revert} disabled={!api.dirty}>
@@ -362,6 +393,14 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
               data-testid="slot-warning"
             >
               <p data-testid="capacity-message">{api.capacity.message}</p>
+              {api.conflicts.duplicateMatrices.length > 0 ? (
+                <p data-testid="duplicate-matrix-warning">
+                  同一枚字模重复落位（保存已拦截）：
+                  {api.conflicts.duplicateMatrices
+                    .map((g) => `「${g.character}」${g.matrixId} 占用 ${g.positions.join('、')}`)
+                    .join('；')}
+                </p>
+              ) : null}
               <p>
                 空格 {api.emptyCells.length} 个
                 {api.conflicts.duplicateCharacters.length > 0
@@ -407,25 +446,57 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
                   </p>
                 ) : null}
                 <div className="flex flex-wrap gap-1">
-                  {charCandidates.map((m) => (
-                    <button
-                      key={m.id}
-                      type="button"
-                      data-testid={`candidate-matrix-${m.id}`}
-                      onClick={() => setPending({ matrix: m })}
-                      className={`rounded border px-2 py-1 text-[11px] transition ${
-                        pending?.matrix.id === m.id
-                          ? 'border-seal bg-seal text-paper'
-                          : 'border-paper-line bg-white text-ink-soft hover:border-seal'
-                      }`}
-                    >
-                      {m.character} · {m.code} · {m.sizeName}
-                    </button>
-                  ))}
+                  {charCandidates.map((m) => {
+                    const holdings = holdingsOf(m.id);
+                    const heldElsewhere = holdings.some((h) => h.typeCase.id !== typeCase.id);
+                    return (
+                      <button
+                        key={m.id}
+                        type="button"
+                        data-testid={`candidate-matrix-${m.id}`}
+                        onClick={() => setPending({ matrix: m })}
+                        title={
+                          holdings.length > 0
+                            ? `现落位：${holdings
+                                .map((h) => `${h.typeCase.code} ${h.slots.map((s) => slotLabel(s.row, s.col)).join('、')}`)
+                                .join('；')}`
+                            : '尚未落位'
+                        }
+                        className={`rounded border px-2 py-1 text-[11px] transition ${
+                          pending?.matrix.id === m.id
+                            ? 'border-seal bg-seal text-paper'
+                            : 'border-paper-line bg-white text-ink-soft hover:border-seal'
+                        }`}
+                      >
+                        {m.character} · {m.code} · {m.sizeName}
+                        {holdings.length > 0 ? (
+                          <span
+                            className={`ml-1 text-[10px] ${heldElsewhere ? 'text-brass' : 'text-ink-mute'}`}
+                            data-testid={`candidate-held-${m.id}`}
+                          >
+                            {heldElsewhere ? '（在别盘，可调拨）' : '（本盘已落位）'}
+                          </span>
+                        ) : null}
+                      </button>
+                    );
+                  })}
                 </div>
                 {pending ? (
                   <p className="text-[11px] text-seal" data-testid="pending-hint">
                     待落位：{pending.matrix.character}（{pending.matrix.code}），点击网格格位完成落位。
+                    {(() => {
+                      const elsewhere = holdingsOf(pending.matrix.id).filter(
+                        (h) => h.typeCase.id !== typeCase.id,
+                      );
+                      return elsewhere.length > 0
+                        ? ` 该字模现位于 ${elsewhere
+                            .map(
+                              (h) =>
+                                `${h.typeCase.code} ${h.slots.map((s) => slotLabel(s.row, s.col)).join('、')}`,
+                            )
+                            .join('；')}，保存后自动从原格位取出。`
+                        : '';
+                    })()}
                   </p>
                 ) : (
                   <p className="text-[11px] text-ink-mute">先选字符与字模，再点网格落位。</p>
